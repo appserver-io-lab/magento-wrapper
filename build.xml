@@ -1,0 +1,174 @@
+<?xml version="1.0"?>
+<project name="appserver-io-lab/magento-wrapper" default="deploy" basedir=".">
+
+    <property file="${basedir}/build.properties"/>
+    <property file="${basedir}/build.default.properties"/>
+
+    <property environment="env" />
+
+    <property name="php-src.dir" value="${basedir}/src" />
+    <property name="php-test.dir" value="${basedir}/tests" />
+    <property name="php-target.dir" value="${basedir}/target"/>
+
+    <!-- ==================================================================== -->
+    <!-- Cleans the directories with the generated source files				  -->
+    <!-- ==================================================================== -->
+    <target name="clean" description="Cleans almost everything, so use carefully.">
+        <delete dir="${php-target.dir}" includeemptydirs="true" quiet="false" verbose="true" failonerror="true"/>
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Prepares all the required directories								  -->
+    <!-- ==================================================================== -->
+    <target name="prepare" depends="clean" description="Prepares all the required directories.">
+        <mkdir dir="${php-target.dir}" />
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Copies the sources to the target directory							  -->
+    <!-- ==================================================================== -->
+    <target name="copy" description="Copies the sources to the target directory.">
+        <copy todir="${php-target.dir}/${webapp.name}" preservelastmodified="true" overwrite="true">
+            <fileset dir="${php-src.dir}">
+                <include name="**/*" />
+            </fileset>
+        </copy>
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Copies the sources to the deploy directory     					  -->
+    <!-- ==================================================================== -->
+    <target name="deploy" depends="prepare" description="Copies the sources to the deploy directory.">
+		<echo message="Copy sources to ${instance.dir} ..." />
+    	<antcall target="copy" />
+        <copy todir="${deploy.dir}" preservelastmodified="true" overwrite="true">
+            <fileset dir="${php-target.dir}">
+                <include name="**/*"/>
+            </fileset>
+        </copy>
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Creates a PHAR file for deployment     					  		  -->
+    <!-- ==================================================================== -->
+	<target name="create-phar" depends="prepare" description="Creates a PHAR file for deployment.">
+		<antcall target="get-magento-src" />
+    	<antcall target="copy" />
+        <!-- install TechDivision_Phar package to create the PHAR archive -->
+        <exec dir="${php-target.dir}" executable="composer">
+            <arg line="require techdivision/phar dev-master" />
+        </exec>
+        <!-- create the PHAR archive itself from the backup sources -->
+        <exec dir="${php-target.dir}" executable="vendor/bin/phar">
+            <arg line="-c create -n ${php-target.dir}/${webapp.name}.phar -d ${php-target.dir}/${webapp.name}"/>
+        </exec>
+	</target>
+
+    <!-- ===================================================================== -->
+    <!-- Copies the .phar file to the appservers deploy directory              -->
+    <!-- ===================================================================== -->
+    <target name="deploy-phar" description="Copies the .phar file to the appservers deploy directory.">
+        <antcall target="create-phar" description="" />
+        <copy file="${php-target.dir}/${webapp.name}.phar" todir="${appserver.base.deploy.dir}" />
+        <delete>
+            <fileset dir="${appserver.base.deploy.dir}" includes="${webapp.name}.phar.*" />
+        </delete>
+        <touch file="${appserver.base.deploy.dir}/${webapp.name}.phar.dodeploy"></touch>
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Deletes the magento instance for testing purpose   			 	  -->
+    <!-- ==================================================================== -->
+    <target name="delete-instance" description="Deletes the magento instance for testing purpose.">
+        <echo message="Delete existing sources in ${instance.dir}..."/>
+        <delete dir="${instance.dir}" includeemptydirs="true" quiet="false" verbose="false" failonerror="true" followsymlinks="false"/>
+		<exec dir="${basedir}" executable="/bin/rm" >
+			<arg line="instance-src"/>
+		</exec>
+    </target>
+
+	<!-- ==================================================================== -->
+	<!-- Initializing a magento instance for testing purpose   			 	  -->
+	<!-- ==================================================================== -->
+	<target name="init-instance" description="Creats a magento instance for testing purpose">
+        <antcall target="prepare" />
+        <antcall target="delete-instance"/>
+		<antcall target="prepare-magento-src"/>
+		<antcall target="create-database"/>
+		<antcall target="finalize-instance-installation"/>
+		<antcall target="deploy"/>
+	</target>
+
+	<!-- ==================================================================== -->
+	<!-- Deletes + creates the Magento database   			 	  			  -->
+	<!-- ==================================================================== -->
+	<target name="create-database" description="Deletes + creates the Magento database.">
+		<echo message="Initialize database ${mysql.database} ..." />
+		<exec executable="mysql">
+			<arg line="-h${mysql.host}"/>
+			<arg line="-u${mysql.username}"/>
+			<arg line="-p${mysql.password}"/>
+			<arg line="-e'DROP DATABASE IF EXISTS ${mysql.database};create database ${mysql.database}'"/>
+		</exec>
+	</target>
+
+	<!-- ==================================================================== -->
+	<!-- Finalize installation of magento instance			   			 	  -->
+	<!-- ==================================================================== -->
+	<target name="finalize-instance-installation" description="Finalize installation of magento instance.">
+		<echo message="Installing instance ${instance.url} ..." />
+		<exec dir="${instance.dir}" executable="/opt/appserver/bin/php">
+			<arg line="-f install.php --
+				--license_agreement_accepted yes
+				--locale 'en_US'
+				--timezone 'Europe/Berlin'
+				--default_currency EUR
+				--db_host ${mysql.host}
+				--db_name ${mysql.database}
+				--db_user ${mysql.username}
+				--db_pass ${mysql.password}
+				--url '${instance.url}'
+				--secure_base_url '${instance.url}'
+				--use_rewrites no
+				--skip_url_validation yes
+				--use_secure no
+				--use_secure_admin no
+				--admin_lastname io
+				--admin_firstname appserver
+                --admin_email 'info@appserver.io'
+				--admin_username appserver
+				--admin_password appserver.i0
+			"/>
+		</exec>
+		<delete file="${instance.dir}/app/etc/use_cache.ser" />
+		<exec dir="${basedir}" executable="/bin/ln" >
+			<arg line="-s ${instance.dir} instance-src"/>
+		</exec>
+	</target>
+
+	<!-- ==================================================================== -->
+	<!-- Get Magento sources by given version number		  		 	  	  -->
+	<!-- ==================================================================== -->
+	<target name="get-magento-src" description="Get Magento sources by given version number.">
+        <!-- cloning Magento sources -->
+		<echo message="Clone and prepare Magento CE ${magento.version} source ..."/>
+		<exec dir="${php-target.dir}" executable="git">
+			<arg line="clone -b ${magento.branch} ${magento.repository} ${webapp.name}"/>
+		</exec>
+		<delete dir="${php-target.dir}/${webapp.name}/.git"/>
+	</target>
+
+	<!-- ==================================================================== -->
+	<!-- Move Magento sources to deploy directory		  		 	  	  	  -->
+	<!-- ==================================================================== -->
+	<target name="prepare-magento-src" description="Move Magento sources to deploy directory.">
+		<!-- download Magento sources -->
+		<antcall target="get-magento-src" />
+        <!-- move Magento sources to deploy directory -->
+		<echo message="Move Magento CE ${magento.version} source to ${deploy.dir}"/>
+		<move todir="${deploy.dir}/${webapp.name}">
+			<fileset dir="${php-target.dir}/${webapp.name}" />
+		</move>
+	</target>
+
+</project>
